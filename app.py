@@ -253,8 +253,8 @@ with tab2:
                 
                 if not df_pos.empty:
                     st.metric("Valeur Portefeuille", f"${total_equity:,.2f}")
-
-		    df_pos = df_pos.sort_values(by="Valeur", ascending=False)
+                    
+                    df_pos = df_pos.sort_values(by="Valeur", ascending=False)
                     
                     st.dataframe(
                         df_pos,
