@@ -5,7 +5,7 @@ import json
 from datetime import datetime
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Polymarket Pro", layout="wide")
+st.set_page_config(page_title="Polymarket Master", layout="wide")
 st.markdown("""
     <style>
         .block-container { padding-top: 0.5rem; padding-left: 0.5rem; padding-right: 0.5rem; }
@@ -13,10 +13,11 @@ st.markdown("""
         footer {visibility: hidden;}
         header {visibility: hidden;}
         .stDataFrame { font-size: 0.8rem; }
+        div[data-testid="stMetricValue"] { font-size: 1.2rem; }
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🦅 Polymarket Pro")
+st.title("🦅 Polymarket Master")
 
 # --- CONSTANTES ---
 MAIN_CATEGORIES = ["Politics", "Crypto", "Sports", "Business", "Science", "Pop Culture"]
@@ -33,7 +34,6 @@ def fetch_active_markets(limit=1000):
 
 def fetch_user_positions(address):
     if len(address) < 10: return []
-    # On récupère les positions
     url = "https://data-api.polymarket.com/positions"
     params = {"user": address, "sizeThreshold": "0.1", "limit": "100"}
     try:
@@ -41,25 +41,27 @@ def fetch_user_positions(address):
         return r.json()
     except: return []
 
-@st.cache_data(ttl=10) # Cache court (10s) pour avoir le prix frais
+@st.cache_data(ttl=10)
 def fetch_clob_prices():
-    """Récupère TOUS les prix du carnet d'ordre central par Token ID"""
+    """Récupère les prix du CLOB et prépare les clés en format DECIMAL et HEXA"""
     url = "https://clob.polymarket.com/prices"
     try:
         r = requests.get(url)
         data = r.json()
-        # On transforme la liste en dictionnaire : { "0xTokenID...": 0.65 }
         price_map = {}
         for item in data:
             if 'token_id' in item and 'price' in item:
-                price_map[item['token_id']] = float(item['price'])
+                # On stocke l'ID tel quel (souvent String d'un entier énorme)
+                t_id = str(item['token_id'])
+                price = float(item['price'])
+                price_map[t_id] = price
         return price_map
     except: return {}
 
 # --- INIT ---
 raw_data = fetch_active_markets()
 
-# --- REGLAGES ---
+# --- RÉGLAGES ---
 with st.expander("⚙️ RÉGLAGES & COMPTE", expanded=False):
     st.subheader("👤 Mon Compte")
     user_address = st.text_input("Adresse Polygon (0x...)", value="", help="Adresse Proxy")
@@ -71,15 +73,12 @@ with st.expander("⚙️ RÉGLAGES & COMPTE", expanded=False):
         min_liquidity = st.number_input("Liq. Min ($)", value=100)
         exclude_bots = st.checkbox("Masquer Bots", value=True)
     
-    # Debug Switch
-    debug_mode = st.checkbox("🔧 Mode Debug (Afficher les données brutes)", value=False)
-
     if st.button("🔄 Rafraîchir"):
         st.cache_data.clear()
         st.rerun()
 
 # --- ONGLETS ---
-tab1, tab2 = st.tabs(["🌎 EXPLORATEUR", "💼 PORTFOLIO"])
+tab1, tab2 = st.tabs(["🌎 EXPLORATEUR", "💼 MON PORTFOLIO"])
 
 # --- ONGLET 1 : EXPLORATEUR ---
 with tab1:
@@ -87,6 +86,8 @@ with tab1:
     if raw_data:
         for item in raw_data:
             if not item.get('markets'): continue
+            
+            # Filtres
             title = item.get('title', '').lower()
             if exclude_bots and ("up or down" in title or "up/down" in title or "15min" in title): continue
             
@@ -130,14 +131,13 @@ with tab1:
             st.dataframe(df_exp.sort_values(by="Sort").drop(columns=["Sort"]), use_container_width=True, hide_index=True)
         else: st.info("Aucun marché.")
 
-# --- ONGLET 2 : PORTFOLIO (ASSET ID MATCHING) ---
+# --- ONGLET 2 : PORTFOLIO (FIX DEFINITIF) ---
 with tab2:
     if not user_address:
-        st.warning("Entre ton adresse dans les réglages.")
+        st.warning("Entre ton adresse ci-dessus.")
     else:
-        with st.spinner("Synchronisation CLOB..."):
+        with st.spinner("Calcul des profits..."):
             positions = fetch_user_positions(user_address)
-            # On charge TOUS les prix du marché (c'est très léger)
             clob_prices = fetch_clob_prices() 
             
             if positions:
@@ -148,30 +148,42 @@ with tab2:
                     size = float(p.get('size', 0))
                     if size < 0.1: continue
                     
-                    # C'EST ICI QUE CA SE JOUE : L'ASSET ID
-                    asset_id = p.get('asset')
-                    
+                    # 1. RECUPERATION DONNEES JSON
+                    asset_decimal = str(p.get('asset')) # Le grand nombre "1597..."
                     title = p.get('title', 'Inconnu')
-                    side_idx = int(p.get('outcomeIndex', 0))
-                    side_label = "OUI" if side_idx == 0 else "NON"
+                    side_label = p.get('outcome', 'OUI') # "Yes" dans ton JSON
                     avg_price = float(p.get('avgPrice', 0))
                     
-                    # 1. On cherche l'Asset ID dans le dictionnaire CLOB
+                    # 2. LOGIQUE DE PRIX (TRIPLE VERROUILLAGE)
                     current_price = 0
-                    source = "API"
+                    source = "-"
                     
-                    if asset_id in clob_prices:
-                        current_price = clob_prices[asset_id]
-                        source = "CLOB" # Victoire !
+                    # Tentative A : Match direct Décimal (Asset ID)
+                    if asset_decimal in clob_prices:
+                        current_price = clob_prices[asset_decimal]
+                        source = "CLOB"
                     
-                    # 2. Fallback
+                    # Tentative B : Conversion en Hexadécimal (Asset ID -> Hex)
                     if current_price == 0:
-                        current_price = float(p.get('currentPrice', 0))
-                        source = "Old"
+                        try:
+                            asset_hex = hex(int(asset_decimal)) # Convertit 1597... en 0x235...
+                            if asset_hex in clob_prices:
+                                current_price = clob_prices[asset_hex]
+                                source = "CLOB(Hex)"
+                        except: pass
+                    
+                    # Tentative C : Fallback sur le JSON (CORRIGÉ : on utilise 'curPrice' et non 'currentPrice')
+                    if current_price == 0:
+                        current_price = float(p.get('curPrice', 0)) # <--- LA CORRECTION EST ICI
+                        source = "API"
 
+                    # 3. CALCULS
                     val = size * current_price
                     total_equity += val
-                    pnl = ((current_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
+                    
+                    pnl_pct = 0
+                    if avg_price > 0:
+                        pnl_pct = ((current_price - avg_price) / avg_price) * 100
 
                     my_pos.append({
                         "Marché": title,
@@ -180,13 +192,15 @@ with tab2:
                         "Achat": avg_price,
                         "Actuel": current_price,
                         "Valeur": val,
-                        "PnL": pnl,
+                        "PnL": pnl_pct,
                         "Src": source
                     })
                 
                 if my_pos:
                     st.metric("Valeur Totale", f"${total_equity:,.2f}")
                     df_pos = pd.DataFrame(my_pos).sort_values(by="Valeur", ascending=False)
+                    
+                    # Coloriage conditionnel simple pour PnL
                     st.dataframe(
                         df_pos,
                         column_config={
@@ -199,17 +213,5 @@ with tab2:
                         },
                         use_container_width=True, hide_index=True
                     )
-                else: st.info("Aucune position active.")
-                
-                # --- ZONE DE DEBUG ---
-                if debug_mode and len(positions) > 0:
-                    st.divider()
-                    st.write("### 🔧 DONNÉES BRUTES (Pour débogage)")
-                    st.write("Voici à quoi ressemble ta première position. Cherche le champ 'asset'.")
-                    st.json(positions[0])
-                    st.write("Exemple de prix CLOB chargés :")
-                    # On affiche 3 exemples de clés CLOB pour comparer
-                    keys_sample = list(clob_prices.keys())[:3]
-                    st.write(keys_sample)
-                    
-            else: st.error("Impossible de récupérer le portfolio.")
+                else: st.info("Portefeuille vide.")
+            else: st.error("Impossible de lire les positions.")
