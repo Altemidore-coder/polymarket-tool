@@ -8,7 +8,7 @@ from datetime import datetime
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Polymarket Tracker", layout="wide")
 
-# --- STYLE ---
+# --- STYLE MOBILE & UI ---
 st.markdown("""
     <style>
         .block-container { padding-top: 1rem; padding-bottom: 0rem; padding-left: 0.5rem; padding-right: 0.5rem; }
@@ -16,9 +16,6 @@ st.markdown("""
         footer {visibility: hidden;}
         header {visibility: hidden;}
         .stDataFrame { font-size: 0.8rem; }
-        /* Style pour les onglets */
-        .stTabs [data-baseweb="tab-list"] { gap: 2px; }
-        .stTabs [data-baseweb="tab"] { padding-right: 10px; padding-left: 10px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -27,9 +24,11 @@ st.title("🦅 Polymarket Tracker")
 # --- CONSTANTES ---
 MAIN_CATEGORIES = ["Politics", "Crypto", "Sports", "Business", "Science", "Pop Culture"]
 
-# --- FONCTION API MARCHÉS ---
+# --- FONCTIONS API ---
+
 @st.cache_data(ttl=60)
 def fetch_markets(limit=1000):
+    """Récupère les marchés généraux pour l'explorateur"""
     url = "https://gamma-api.polymarket.com/events"
     params = {"limit": limit, "active": "true", "closed": "false", "order": "endDate", "ascending": "true"}
     try:
@@ -38,51 +37,65 @@ def fetch_markets(limit=1000):
         return r.json()
     except: return []
 
-# --- FONCTION API PORTFOLIO (CORRIGÉE) ---
 def fetch_user_positions(address):
+    """Récupère les positions brutes de l'utilisateur (Data API)"""
     if len(address) < 40: return []
-    
-    # ⚠️ CHANGEMENT IMPORTANT : On utilise 'data-api' au lieu de 'gamma-api'
     url = "https://data-api.polymarket.com/positions"
-    
-    params = {
-        "user": address,
-        "sizeThreshold": "0.1", # Ignore les poussières (positions < 0.1 part)
-        "limit": "50"
-    }
-    
+    params = {"user": address, "sizeThreshold": "0.1", "limit": "50"} # On ignore les poussières
     try:
         r = requests.get(url, params=params)
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        # On affiche l'erreur dans la console pour t'aider à débugger si besoin
-        print(f"Erreur Portfolio : {e}") 
+        print(f"Erreur Portfolio: {e}")
         return []
 
-# --- INIT DATA ---
+def fetch_specific_prices(market_ids):
+    """NOUVEAU : Récupère les prix en direct pour une liste d'IDs précis"""
+    if not market_ids: return {}
+    
+    # On nettoie la liste et on limite à 50 pour ne pas casser l'URL
+    clean_ids = list(set(market_ids))[:50]
+    
+    # On construit une requête : ?id=123&id=456...
+    query_params = [f"id={mid}" for mid in clean_ids]
+    query_string = "&".join(query_params)
+    
+    url = f"https://gamma-api.polymarket.com/markets?{query_string}"
+    
+    try:
+        r = requests.get(url)
+        data = r.json()
+        
+        # On crée un dictionnaire propre : ID -> [PrixYes, PrixNo]
+        price_map = {}
+        for m in data:
+            try:
+                prices = json.loads(m.get('outcomePrices', '["0","0"]'))
+                price_map[m['id']] = prices # Ex: ["0.65", "0.35"]
+            except: pass
+        return price_map
+    except: return {}
+
+# --- CHARGEMENT DONNÉES GLOBALES ---
 raw_data = fetch_markets()
 
-# --- BARRE DE RÉGLAGES (ACCORDÉON) ---
-with st.expander("⚙️ RÉGLAGES & COMPTE", expanded=True): # Ouvert par défaut pour la première fois
-    
-    # 1. SECTION COMPTE
+# --- BARRE DE RÉGLAGES ---
+with st.expander("⚙️ RÉGLAGES & COMPTE", expanded=True):
     st.write("### 👤 Mon Compte")
-    user_address = st.text_input("Adresse Polygon (0x...)", help="Colle ton adresse publique ici pour voir tes positions.")
+    user_address = st.text_input("Adresse Polygon (0x...)", help="Adresse publique Metamask/Proxy")
     
     st.divider()
     
-    # 2. SECTION FILTRES MARCHÉ
     st.write("### 🔍 Filtres Marché")
     c1, c2 = st.columns(2)
     with c1:
         max_days = st.slider("Jours Max", 0, 30, 7)
-        only_rewards = st.checkbox("💰 Avec Rewards LP", value=False, help="Ne montre que les marchés qui offrent des bonus.")
+        only_rewards = st.checkbox("💰 Avec Rewards LP", value=False)
     with c2:
         min_liquidity = st.number_input("Liq. Min ($)", value=100, step=100)
         exclude_up_down = st.checkbox("Masquer Bots", value=True)
 
-    # Catégories
     st.write("📂 Catégories")
     all_found_cats = set()
     for item in raw_data:
@@ -96,30 +109,23 @@ with st.expander("⚙️ RÉGLAGES & COMPTE", expanded=True): # Ouvert par défa
         st.cache_data.clear()
         st.rerun()
 
-# --- LES ONGLETS (Marchés / Mon Portfolio) ---
+# --- ONGLETS ---
 tab1, tab2 = st.tabs(["🌎 EXPLORATEUR", "💼 MON PORTFOLIO"])
 
-# ==========================================
-# ONGLET 1 : EXPLORATEUR DE MARCHÉS
-# ==========================================
+# --- ONGLET 1 : EXPLORATEUR ---
 with tab1:
     market_list = []
     if raw_data:
         for item in raw_data:
             if not item.get('markets'): continue
-
-            # Filtre Rewards LP
-            if only_rewards:
-                # On regarde si le champ rewards existe et n'est pas vide
-                if not item.get('rewards') or len(item.get('rewards', [])) == 0:
-                    continue
-
-            # Filtre Anti-Bot
+            
+            # Filtres
+            if only_rewards and (not item.get('rewards') or len(item.get('rewards', [])) == 0): continue
+            
             title = item.get('title', '').lower()
-            if exclude_up_down:
-                if "up or down" in title or "up/down" in title or "15min" in title: continue
+            if exclude_up_down and ("up or down" in title or "up/down" in title or "15min" in title): continue
 
-            # Catégories
+            # Catégorie
             tags_raw = item.get('tags', [])
             market_category = "Autre"
             current_tags = [t.get('label') for t in tags_raw if t.get('label')]
@@ -158,10 +164,7 @@ with tab1:
             liq = float(m.get('liquidity', 0) or 0)
             vol = float(item.get('volume', 0) or 0)
             
-            # Badge Rewards
-            rewards_badge = ""
-            if item.get('rewards'):
-                rewards_badge = "🎁"
+            rewards_badge = "🎁" if item.get('rewards') else ""
 
             if (hours_left <= (max_days * 24)) and (liq >= min_liquidity):
                 market_list.append({
@@ -177,9 +180,8 @@ with tab1:
         df = pd.DataFrame(market_list)
         if not df.empty:
             df = df.sort_values(by="Sort", ascending=True)
-            display_df = df.drop(columns=["Sort"])
             st.dataframe(
-                display_df,
+                df.drop(columns=["Sort"]),
                 column_config={
                     "Lien": st.column_config.LinkColumn("Go"),
                     "Prix": st.column_config.ProgressColumn("Prix", format="%.2f", min_value=0, max_value=1),
@@ -188,107 +190,80 @@ with tab1:
                 use_container_width=True,
                 hide_index=True
             )
-        else:
-            st.info("Aucun marché trouvé.")
+        else: st.info("Aucun marché trouvé.")
 
-# ==========================================
-# ONGLET 2 : MON PORTFOLIO (CORRIGÉ & COMPLET)
-# ==========================================
+# --- ONGLET 2 : PORTFOLIO (FIX PRIX) ---
 with tab2:
     if not user_address:
-        st.warning("⚠️ Entre ton adresse Polygon dans les réglages ci-dessus (Barre grise 'Réglages') pour voir tes positions.")
+        st.warning("⚠️ Entre ton adresse Polygon ci-dessus.")
     else:
-        with st.spinner("Récupération du portfolio..."):
+        with st.spinner("Analyse du portfolio..."):
             positions_data = fetch_user_positions(user_address)
-        
-        if positions_data:
-            # --- ÉTAPE 1 : CRÉATION D'UN DICTIONNAIRE DE PRIX ---
-            # On crée un "annuaire" rapide pour trouver le prix d'un marché grâce à son ID (slug)
-            # Structure : { "trump-win": {"Yes": 0.60, "No": 0.40}, ... }
-            price_map = {}
-            for m in raw_data:
-                slug = m.get('slug')
-                if not slug or not m.get('markets'): continue
-                
-                try:
-                    prices = json.loads(m['markets'][0].get('outcomePrices', '["0","0"]'))
-                    price_map[slug] = {
-                        "0": float(prices[0]), # Prix YES
-                        "1": float(prices[1])  # Prix NO
-                    }
-                except: pass
-
-            # --- ÉTAPE 2 : TRAITEMENT DES POSITIONS ---
-            my_pos = []
-            total_value = 0
             
-            for p in positions_data:
-                # 1. Récupération des infos de base
-                size = float(p.get('size', 0))
-                if size < 0.1: continue # On cache les "poussières"
+            if positions_data:
+                # 1. On récupère la liste des IDs de marchés de tes positions
+                my_market_ids = [p.get('market') for p in positions_data if p.get('market')]
                 
-                title = p.get('title', 'Marché Inconnu')
-                slug = p.get('marketSlug')
-                outcome_idx = str(p.get('outcomeIndex', '0')) # '0' pour YES, '1' pour NO
-                outcome_label = "OUI" if outcome_idx == '0' else "NON"
+                # 2. APPEL API CIBLÉ : On demande les prix pour ces marchés précis
+                real_time_prices = fetch_specific_prices(my_market_ids)
                 
-                avg_price = float(p.get('avgPrice', 0))
+                my_pos = []
+                total_value = 0
                 
-                # 2. Récupération du PRIX ACTUEL via notre "Annuaire" (Cross-reference)
-                current_price = 0
-                if slug in price_map:
-                    # On va chercher le prix exact (Yes ou No) dans notre map
-                    current_price = price_map[slug].get(outcome_idx, 0)
-                else:
-                    # Si le marché n'est pas dans les 1000 chargés, on essaie de prendre celui de la position (souvent vieux)
-                    current_price = float(p.get('currentPrice', 0))
+                for p in positions_data:
+                    size = float(p.get('size', 0))
+                    if size < 0.1: continue 
+                    
+                    market_id = p.get('market')
+                    title = p.get('title', 'Inconnu')
+                    outcome_idx = int(p.get('outcomeIndex', 0)) # 0 ou 1
+                    outcome_label = "OUI" if outcome_idx == 0 else "NON"
+                    avg_price = float(p.get('avgPrice', 0))
+                    
+                    # 3. On va chercher le prix dans notre nouveau dictionnaire frais
+                    current_price = 0
+                    if market_id in real_time_prices:
+                        try:
+                            prices_list = real_time_prices[market_id]
+                            current_price = float(prices_list[outcome_idx])
+                        except: pass
+                    
+                    # Fallback : Si l'API échoue, on prend le prix estimé (souvent faux mais mieux que 0)
+                    if current_price == 0:
+                        current_price = float(p.get('currentPrice', 0))
 
-                # 3. Calculs financiers
-                position_value = size * current_price
-                total_value += position_value
-                
-                # Calcul du Profit/Perte (PnL)
-                pnl_pct = 0
-                if avg_price > 0:
-                    pnl_pct = ((current_price - avg_price) / avg_price) * 100
+                    # Calculs
+                    val = size * current_price
+                    total_value += val
+                    pnl = ((current_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
 
-                my_pos.append({
-                    "Marché": title,
-                    "Côté": outcome_label,
-                    "Parts": size,                # <-- NOUVEAU
-                    "Achat": avg_price,
-                    "Actuel": current_price,      # <-- CORRIGÉ
-                    "Valeur ($)": position_value, # <-- NOUVEAU
-                    "PnL": pnl_pct,
-                    "Sort_PnL": pnl_pct
-                })
-            
-            df_pos = pd.DataFrame(my_pos)
-            
-            if not df_pos.empty:
-                # Petit résumé en haut
-                st.metric("Valeur Totale Estimée", f"${total_value:,.2f}")
-                
-                # Tri par PnL (Les plus gros gains/pertes en haut)
-                df_pos = df_pos.sort_values(by="Sort_PnL", ascending=False)
-                
-                st.dataframe(
-                    df_pos.drop(columns=["Sort_PnL"]),
-                    column_config={
-                        "Marché": st.column_config.TextColumn("Marché", width="medium"),
-                        "Parts": st.column_config.NumberColumn("Parts", format="%.1f"),
-                        "Achat": st.column_config.NumberColumn("Prix Achat", format="%.3f"), # 3 décimales pour précision
-                        "Actuel": st.column_config.NumberColumn("Prix Actuel", format="%.3f"),
-                        "Valeur ($)": st.column_config.NumberColumn(format="$%.2f"),
-                        "PnL": st.column_config.NumberColumn(
-                            "Profit %", 
-                            format="%.1f%%",
-                        )
-                    },
-                    use_container_width=True,
-                    hide_index=True
-                )
-            else:
-                st.info("Aucune position active trouvée (ou marché hors du top 1000).")
-        else:
-            st.info("Portefeuille vide ou erreur de lecture.")
+                    my_pos.append({
+                        "Marché": title,
+                        "Côté": outcome_label,
+                        "Parts": size,
+                        "Achat": avg_price,
+                        "Actuel": current_price,
+                        "Valeur": val,
+                        "PnL": pnl,
+                        "Sort_PnL": pnl
+                    })
+
+                df_pos = pd.DataFrame(my_pos)
+                if not df_pos.empty:
+                    st.metric("Valeur Totale", f"${total_value:,.2f}")
+                    df_pos = df_pos.sort_values(by="Sort_PnL", ascending=False)
+                    st.dataframe(
+                        df_pos.drop(columns=["Sort_PnL"]),
+                        column_config={
+                            "Marché": st.column_config.TextColumn("Marché", width="medium"),
+                            "Parts": st.column_config.NumberColumn(format="%.1f"),
+                            "Achat": st.column_config.NumberColumn(format="%.3f"),
+                            "Actuel": st.column_config.NumberColumn(format="%.3f"),
+                            "Valeur": st.column_config.NumberColumn(format="$%.2f"),
+                            "PnL": st.column_config.NumberColumn("Profit %", format="%.1f%%")
+                        },
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else: st.info("Aucune position active.")
+            else: st.info("Portefeuille vide ou adresse incorrecte.")
