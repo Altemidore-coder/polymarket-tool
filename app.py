@@ -8,10 +8,9 @@ from datetime import datetime
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Polymarket Tracker", layout="wide")
 
-# --- STYLE MOBILE & UI ---
 st.markdown("""
     <style>
-        .block-container { padding-top: 1rem; padding-bottom: 0rem; padding-left: 0.5rem; padding-right: 0.5rem; }
+        .block-container { padding-top: 1rem; padding-left: 0.5rem; padding-right: 0.5rem; }
         #MainMenu {visibility: hidden;}
         footer {visibility: hidden;}
         header {visibility: hidden;}
@@ -19,16 +18,13 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("🦅 Polymarket Tracker")
-
-# --- CONSTANTES ---
-MAIN_CATEGORIES = ["Politics", "Crypto", "Sports", "Business", "Science", "Pop Culture"]
+st.title("🦅 Polymarket Tracker (CLOB Edition)")
 
 # --- FONCTIONS API ---
 
 @st.cache_data(ttl=60)
 def fetch_markets(limit=1000):
-    """Récupère les marchés généraux pour l'explorateur"""
+    """Récupère les infos générales des marchés (Titres, Images, Dates)"""
     url = "https://gamma-api.polymarket.com/events"
     params = {"limit": limit, "active": "true", "closed": "false", "order": "endDate", "ascending": "true"}
     try:
@@ -38,232 +34,169 @@ def fetch_markets(limit=1000):
     except: return []
 
 def fetch_user_positions(address):
-    """Récupère les positions brutes de l'utilisateur (Data API)"""
-    if len(address) < 40: return []
-    url = "https://data-api.polymarket.com/positions"
-    params = {"user": address, "sizeThreshold": "0.1", "limit": "50"} # On ignore les poussières
+    """Récupère tes positions (Quantités et Prix d'achat)"""
+    if len(address) < 10: return []
+    # On utilise l'API V2 Data qui est plus robuste
+    url = f"https://data-api.polymarket.com/positions?user={address}"
     try:
-        r = requests.get(url, params=params)
-        r.raise_for_status()
+        r = requests.get(url)
         return r.json()
-    except Exception as e:
-        print(f"Erreur Portfolio: {e}")
-        return []
+    except: return []
 
-def fetch_specific_prices(market_ids):
-    """NOUVEAU : Récupère les prix en direct pour une liste d'IDs précis"""
-    if not market_ids: return {}
-    
-    # On nettoie la liste et on limite à 50 pour ne pas casser l'URL
-    clean_ids = list(set(market_ids))[:50]
-    
-    # On construit une requête : ?id=123&id=456...
-    query_params = [f"id={mid}" for mid in clean_ids]
-    query_string = "&".join(query_params)
-    
-    url = f"https://gamma-api.polymarket.com/markets?{query_string}"
-    
+def fetch_clob_prices():
+    """
+    LA SOLUTION ULTIME : Récupère les prix en direct du moteur de trading (CLOB).
+    Renvoie un dictionnaire { "0xTokenID...": 0.65 }
+    """
+    url = "https://clob.polymarket.com/prices"
     try:
         r = requests.get(url)
         data = r.json()
         
-        # On crée un dictionnaire propre : ID -> [PrixYes, PrixNo]
+        # On transforme la liste en dictionnaire pour une recherche instantanée
+        # L'API renvoie souvent : [{"token_id": "...", "price": "..."}]
         price_map = {}
-        for m in data:
+        for item in data:
             try:
-                prices = json.loads(m.get('outcomePrices', '["0","0"]'))
-                price_map[m['id']] = prices # Ex: ["0.65", "0.35"]
+                # Le prix retourné est souvent une string, on convertit
+                p = float(item.get('price', 0))
+                t_id = item.get('token_id')
+                if t_id:
+                    price_map[t_id] = p
             except: pass
+            
         return price_map
-    except: return {}
+    except Exception as e:
+        print(f"Erreur CLOB: {e}")
+        return {}
 
-# --- CHARGEMENT DONNÉES GLOBALES ---
+# --- INITIALISATION ---
 raw_data = fetch_markets()
 
 # --- BARRE DE RÉGLAGES ---
 with st.expander("⚙️ RÉGLAGES & COMPTE", expanded=True):
     st.write("### 👤 Mon Compte")
-    user_address = st.text_input("Adresse Polygon (0x...)", help="Adresse publique Metamask/Proxy")
+    user_address = st.text_input("Adresse Polygon (0x...)", help="Ton adresse publique")
     
     st.divider()
     
-    st.write("### 🔍 Filtres Marché")
     c1, c2 = st.columns(2)
     with c1:
         max_days = st.slider("Jours Max", 0, 30, 7)
-        only_rewards = st.checkbox("💰 Avec Rewards LP", value=False)
     with c2:
-        min_liquidity = st.number_input("Liq. Min ($)", value=100, step=100)
-        exclude_up_down = st.checkbox("Masquer Bots", value=True)
+        min_liquidity = st.number_input("Liq. Min ($)", value=100)
 
-    st.write("📂 Catégories")
-    all_found_cats = set()
-    for item in raw_data:
-        tags = item.get('tags', [])
-        for t in tags:
-            if t.get('label'): all_found_cats.add(t.get('label'))
-    options = sorted(list(set(MAIN_CATEGORIES + list(all_found_cats))))
-    selected_cats = st.multiselect("Thèmes", options, default=[c for c in MAIN_CATEGORIES if c in options])
-
-    if st.button("🔄 Actualiser"):
+    # Bouton de debug pour vérifier si l'adresse fonctionne
+    if st.button("🔄 Tout Actualiser"):
         st.cache_data.clear()
         st.rerun()
 
 # --- ONGLETS ---
-tab1, tab2 = st.tabs(["🌎 EXPLORATEUR", "💼 MON PORTFOLIO"])
+tab1, tab2 = st.tabs(["🌎 MARCHÉS", "💼 PORTFOLIO"])
 
-# --- ONGLET 1 : EXPLORATEUR ---
+# --- ONGLET 1 : EXPLORATEUR (Simple) ---
 with tab1:
     market_list = []
     if raw_data:
         for item in raw_data:
             if not item.get('markets'): continue
-            
-            # Filtres
-            if only_rewards and (not item.get('rewards') or len(item.get('rewards', [])) == 0): continue
-            
-            title = item.get('title', '').lower()
-            if exclude_up_down and ("up or down" in title or "up/down" in title or "15min" in title): continue
-
-            # Catégorie
-            tags_raw = item.get('tags', [])
-            market_category = "Autre"
-            current_tags = [t.get('label') for t in tags_raw if t.get('label')]
-            found_main = False
-            for main_cat in MAIN_CATEGORIES:
-                if main_cat in current_tags:
-                    market_category = main_cat
-                    found_main = True
-                    break
-            if not found_main and current_tags: market_category = current_tags[0]
-            if market_category not in selected_cats: continue
-
             m = item['markets'][0]
             
-            # Temps
-            end_date_str = item.get('endDate')
+            # Filtres basiques pour aller vite
+            end_date = item.get('endDate')
             hours_left = 9999
-            time_display = "N/A"
-            if end_date_str:
+            if end_date:
                 try:
-                    end_dt = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
-                    now = datetime.now(end_dt.tzinfo)
-                    total_seconds = (end_dt - now).total_seconds()
-                    if total_seconds <= 0: continue
-                    hours_left = total_seconds / 3600
-                    days_left = hours_left / 24
-                    if days_left < 1: time_display = f"{int(hours_left)}h 🔥"
-                    else: time_display = f"{int(days_left)}j"
+                    dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                    hours_left = (dt - datetime.now(dt.tzinfo)).total_seconds() / 3600
                 except: pass
-
+            
+            if hours_left > (max_days * 24): continue
+            
             try:
                 prices = json.loads(m.get('outcomePrices', '["0","0"]'))
-                price_yes = float(prices[0])
-            except: price_yes = 0
-
-            liq = float(m.get('liquidity', 0) or 0)
-            vol = float(item.get('volume', 0) or 0)
+                price = float(prices[0])
+            except: price = 0
             
-            rewards_badge = "🎁" if item.get('rewards') else ""
+            market_list.append({
+                "Titre": item.get('title'),
+                "Prix (Yes)": price,
+                "Vol.": int(item.get('volume', 0)),
+                "Lien": f"https://polymarket.com/event/{item.get('slug')}"
+            })
+            
+    st.dataframe(pd.DataFrame(market_list), use_container_width=True, hide_index=True)
 
-            if (hours_left <= (max_days * 24)) and (liq >= min_liquidity):
-                market_list.append({
-                    "Info": f"{market_category} {rewards_badge}",
-                    "Titre": item.get('title'),
-                    "Temps": time_display,
-                    "Prix": price_yes,
-                    "Liq.": liq,
-                    "Sort": hours_left,
-                    "Lien": f"https://polymarket.com/event/{item.get('slug')}"
-                })
-
-        df = pd.DataFrame(market_list)
-        if not df.empty:
-            df = df.sort_values(by="Sort", ascending=True)
-            st.dataframe(
-                df.drop(columns=["Sort"]),
-                column_config={
-                    "Lien": st.column_config.LinkColumn("Go"),
-                    "Prix": st.column_config.ProgressColumn("Prix", format="%.2f", min_value=0, max_value=1),
-                    "Liq.": st.column_config.NumberColumn(format="$%d"),
-                },
-                use_container_width=True,
-                hide_index=True
-            )
-        else: st.info("Aucun marché trouvé.")
-
-# --- ONGLET 2 : PORTFOLIO (FIX PRIX) ---
+# --- ONGLET 2 : PORTFOLIO (CLOB) ---
 with tab2:
     if not user_address:
-        st.warning("⚠️ Entre ton adresse Polygon ci-dessus.")
+        st.info("Entre ton adresse ci-dessus.")
     else:
-        with st.spinner("Analyse du portfolio..."):
-            positions_data = fetch_user_positions(user_address)
+        with st.spinner("Récupération des prix CLOB en direct..."):
+            # 1. On charge tes positions
+            my_positions = fetch_user_positions(user_address)
             
-            if positions_data:
-                # 1. On récupère la liste des IDs de marchés de tes positions
-                my_market_ids = [p.get('market') for p in positions_data if p.get('market')]
+            # 2. On charge TOUS les prix du marché (La clé magique)
+            clob_prices = fetch_clob_prices()
+            
+            if my_positions:
+                clean_pos = []
+                total_val = 0
                 
-                # 2. APPEL API CIBLÉ : On demande les prix pour ces marchés précis
-                real_time_prices = fetch_specific_prices(my_market_ids)
-                
-                my_pos = []
-                total_value = 0
-                
-                for p in positions_data:
+                for p in my_positions:
                     size = float(p.get('size', 0))
-                    if size < 0.1: continue 
+                    if size < 0.1: continue # On ignore les poussières
                     
-                    market_id = p.get('market')
+                    # L'ID unique de l'actif (C'est ça le lien avec le CLOB !)
+                    asset_id = p.get('asset') 
+                    
                     title = p.get('title', 'Inconnu')
-                    outcome_idx = int(p.get('outcomeIndex', 0)) # 0 ou 1
-                    outcome_label = "OUI" if outcome_idx == 0 else "NON"
-                    avg_price = float(p.get('avgPrice', 0))
+                    side = "OUI" if p.get('outcomeIndex') == 0 else "NON"
+                    avg_buy = float(p.get('avgPrice', 0))
                     
-                    # 3. On va chercher le prix dans notre nouveau dictionnaire frais
-                    current_price = 0
-                    if market_id in real_time_prices:
-                        try:
-                            prices_list = real_time_prices[market_id]
-                            current_price = float(prices_list[outcome_idx])
-                        except: pass
+                    # 3. RECHERCHE DU PRIX
+                    # On regarde si cet asset_id est dans notre liste de prix CLOB
+                    current_price = clob_prices.get(asset_id, 0.0)
                     
-                    # Fallback : Si l'API échoue, on prend le prix estimé (souvent faux mais mieux que 0)
+                    # Fallback : Si le CLOB ne l'a pas (rare), on prend le prix estimé de l'API Position
                     if current_price == 0:
                         current_price = float(p.get('currentPrice', 0))
 
-                    # Calculs
                     val = size * current_price
-                    total_value += val
-                    pnl = ((current_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
-
-                    my_pos.append({
+                    total_val += val
+                    
+                    pnl = 0
+                    if avg_buy > 0:
+                        pnl = ((current_price - avg_buy) / avg_buy) * 100
+                    
+                    clean_pos.append({
                         "Marché": title,
-                        "Côté": outcome_label,
+                        "Côté": side,
                         "Parts": size,
-                        "Achat": avg_price,
+                        "Achat": avg_buy,
                         "Actuel": current_price,
                         "Valeur": val,
-                        "PnL": pnl,
-                        "Sort_PnL": pnl
+                        "PnL": pnl
                     })
-
-                df_pos = pd.DataFrame(my_pos)
-                if not df_pos.empty:
-                    st.metric("Valeur Totale", f"${total_value:,.2f}")
-                    df_pos = df_pos.sort_values(by="Sort_PnL", ascending=False)
+                
+                df = pd.DataFrame(clean_pos)
+                if not df.empty:
+                    st.metric("Valeur Totale", f"${total_val:,.2f}")
+                    
+                    # On colore le PnL en fonction du résultat
                     st.dataframe(
-                        df_pos.drop(columns=["Sort_PnL"]),
+                        df,
                         column_config={
-                            "Marché": st.column_config.TextColumn("Marché", width="medium"),
-                            "Parts": st.column_config.NumberColumn(format="%.1f"),
+                            "Marché": st.column_config.TextColumn(width="medium"),
                             "Achat": st.column_config.NumberColumn(format="%.3f"),
-                            "Actuel": st.column_config.NumberColumn(format="%.3f"),
+                            "Actuel": st.column_config.NumberColumn(format="%.3f"), # Doit être > 0 maintenant !
                             "Valeur": st.column_config.NumberColumn(format="$%.2f"),
-                            "PnL": st.column_config.NumberColumn("Profit %", format="%.1f%%")
+                            "PnL": st.column_config.NumberColumn("Profit %", format="%.2f%%")
                         },
                         use_container_width=True,
                         hide_index=True
                     )
-                else: st.info("Aucune position active.")
-            else: st.info("Portefeuille vide ou adresse incorrecte.")
+                else:
+                    st.warning("Aucune position active trouvée.")
+            else:
+                st.error("Impossible de lire le portfolio. Vérifie l'adresse.")
