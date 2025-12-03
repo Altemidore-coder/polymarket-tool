@@ -15,7 +15,6 @@ st.markdown("""
         footer {visibility: hidden;}
         header {visibility: hidden;}
         .stDataFrame { font-size: 0.8rem; }
-        /* Style des métriques */
         div[data-testid="stMetricValue"] { font-size: 1.2rem; }
     </style>
 """, unsafe_allow_html=True)
@@ -23,21 +22,15 @@ st.markdown("""
 st.title("🦅 Polymarket Master")
 
 # --- CONSTANTES ---
-MAIN_CATEGORIES = ["Politics", "Crypto", "Sports", "Business", "Science", "Pop Culture", "News"]
+MAIN_CATEGORIES = ["Politics", "Crypto", "Sports", "Business", "Science", "Pop Culture"]
 
 # --- FONCTIONS API ---
 
 @st.cache_data(ttl=60)
 def fetch_active_markets(limit=1000):
-    """Récupère les 1000 marchés les plus urgents/actifs pour l'Explorer et le Mapping de prix"""
+    """Pour l'Explorer : Récupère les marchés les plus actifs"""
     url = "https://gamma-api.polymarket.com/events"
-    params = {
-        "limit": limit, 
-        "active": "true", 
-        "closed": "false", 
-        "order": "volume", # On prend par volume pour avoir les prix les plus fiables
-        "ascending": "false"
-    }
+    params = {"limit": limit, "active": "true", "closed": "false", "order": "volume", "ascending": "false"}
     try:
         r = requests.get(url, params=params)
         r.raise_for_status()
@@ -45,7 +38,7 @@ def fetch_active_markets(limit=1000):
     except: return []
 
 def fetch_user_positions(address):
-    """Récupère le portfolio via l'API Data"""
+    """Pour le Portfolio : Récupère les positions brutes"""
     if len(address) < 10: return []
     url = "https://data-api.polymarket.com/positions"
     params = {"user": address, "sizeThreshold": "0.1", "limit": "100"}
@@ -54,27 +47,46 @@ def fetch_user_positions(address):
         return r.json()
     except: return []
 
-# --- CHARGEMENT DES DONNÉES ---
+def fetch_specific_markets(id_list):
+    """
+    SNIPER : Récupère les infos en direct pour une liste précise d'IDs.
+    Gère le découpage par paquets (batching) pour ne pas casser l'URL.
+    """
+    if not id_list: return {}
+    
+    # On enlève les doublons et les valeurs vides
+    clean_ids = list(set([x for x in id_list if x]))
+    
+    price_map = {}
+    base_url = "https://gamma-api.polymarket.com/markets"
+    
+    # On procède par paquets de 20 IDs pour éviter les erreurs d'URL trop longue
+    batch_size = 20
+    for i in range(0, len(clean_ids), batch_size):
+        batch = clean_ids[i:i + batch_size]
+        # On construit la requête ?id=1&id=2&id=3...
+        query_string = "&".join([f"id={mid}" for mid in batch])
+        full_url = f"{base_url}?{query_string}"
+        
+        try:
+            r = requests.get(full_url)
+            data = r.json()
+            # On stocke le résultat : ID -> [PrixYes, PrixNo]
+            for m in data:
+                try:
+                    prices = json.loads(m.get('outcomePrices', '["0","0"]'))
+                    price_map[m['id']] = prices
+                except: pass
+        except: pass
+        
+    return price_map
+
+# --- INITIALISATION ---
 raw_data = fetch_active_markets()
 
-# --- CONSTRUCTION DU MAPPING DE PRIX (La Clé du succès) ---
-# On crée un dictionnaire : { "slug-du-marché": [PrixYes, PrixNo] }
-price_oracle = {}
-if raw_data:
-    for item in raw_data:
-        slug = item.get('slug') # ex: will-trump-win
-        if not slug or not item.get('markets'): continue
-        try:
-            # On récupère les prix du marché principal
-            prices = json.loads(item['markets'][0].get('outcomePrices', '["0","0"]'))
-            price_oracle[slug] = prices # Stocke ["0.65", "0.35"]
-        except: pass
-
-# --- UI: BARRE DE RÉGLAGES (ACCORDÉON) ---
-with st.expander("⚙️ RÉGLAGES & COMPTE (Cliquer pour ouvrir)", expanded=False):
-    
+# --- UI: RÉGLAGES ---
+with st.expander("⚙️ RÉGLAGES & COMPTE", expanded=False):
     st.subheader("👤 Mon Compte")
-    # Astuce : on met une valeur par défaut vide pour éviter l'erreur si vide
     user_address = st.text_input("Adresse Polygon (0x...)", value="", help="Adresse Proxy ou EOA")
     
     st.divider()
@@ -87,14 +99,13 @@ with st.expander("⚙️ RÉGLAGES & COMPTE (Cliquer pour ouvrir)", expanded=Fal
     with c2:
         min_liquidity = st.number_input("Liq. Min ($)", value=100, step=100)
         exclude_bots = st.checkbox("Masquer Bots", value=True)
-
+    
     # Catégories dynamiques
     found_cats = set()
     for item in raw_data:
         tags = item.get('tags', [])
         for t in tags:
             if t.get('label'): found_cats.add(t.get('label'))
-    
     all_cats = sorted(list(set(MAIN_CATEGORIES + list(found_cats))))
     selected_cats = st.multiselect("Thèmes", all_cats, default=[c for c in MAIN_CATEGORIES if c in all_cats])
 
@@ -105,20 +116,16 @@ with st.expander("⚙️ RÉGLAGES & COMPTE (Cliquer pour ouvrir)", expanded=Fal
 # --- ONGLETS ---
 tab1, tab2 = st.tabs(["🌎 EXPLORATEUR", "💼 MON PORTFOLIO"])
 
-# ==========================================
-# ONGLET 1 : EXPLORATEUR (RESTAURÉ)
-# ==========================================
+# --- ONGLET 1 : EXPLORATEUR ---
 with tab1:
     explorer_list = []
     if raw_data:
         for item in raw_data:
             if not item.get('markets'): continue
             
-            # 1. Filtres
             title = item.get('title', '').lower()
             if exclude_bots and ("up or down" in title or "up/down" in title or "15min" in title): continue
             
-            # Catégorie
             tags = [t.get('label') for t in item.get('tags', []) if t.get('label')]
             cat = "Autre"
             for m_cat in MAIN_CATEGORIES:
@@ -128,7 +135,6 @@ with tab1:
             if not cat in MAIN_CATEGORIES and tags: cat = tags[0]
             if cat not in selected_cats: continue
 
-            # 2. Temps & Metrics
             end_str = item.get('endDate')
             hours_left = 9999
             time_lbl = "N/A"
@@ -146,10 +152,10 @@ with tab1:
             liq = float(m.get('liquidity', 0) or 0)
             vol = float(item.get('volume', 0) or 0)
             
-            # Prix via Oracle interne (plus fiable) ou raw
-            slug = item.get('slug')
-            prices = price_oracle.get(slug, ["0", "0"])
-            p_yes = float(prices[0])
+            try:
+                prices = json.loads(m.get('outcomePrices', '["0","0"]'))
+                p_yes = float(prices[0])
+            except: p_yes = 0
 
             if (hours_left <= (max_days * 24)) and (liq >= min_liquidity) and (vol >= min_vol):
                 explorer_list.append({
@@ -177,85 +183,92 @@ with tab1:
                 use_container_width=True,
                 hide_index=True
             )
-        else: st.info("Aucun marché trouvé avec ces filtres.")
+        else: st.info("Aucun marché trouvé.")
 
-# ==========================================
-# ONGLET 2 : PORTFOLIO (MAPPING SLUG)
-# ==========================================
+# --- ONGLET 2 : PORTFOLIO (TARGETED FETCH) ---
 with tab2:
     if not user_address:
-        st.warning("⚠️ Entre ton adresse dans 'Réglages' pour voir ton portfolio.")
+        st.warning("⚠️ Entre ton adresse dans 'Réglages'.")
     else:
-        positions = fetch_user_positions(user_address)
-        
-        if positions:
-            my_pos = []
-            total_equity = 0
+        with st.spinner("Analyse approfondie du portefeuille..."):
+            positions = fetch_user_positions(user_address)
             
-            for p in positions:
-                size = float(p.get('size', 0))
-                if size < 0.1: continue
+            if positions:
+                # 1. Extraction des IDs de tes marchés
+                my_market_ids = [p.get('market') for p in positions if p.get('market')]
                 
-                title = p.get('title', 'Inconnu')
-                slug = p.get('marketSlug') # La clé de liaison !
-                side_idx = int(p.get('outcomeIndex', 0))
-                side_label = "OUI" if side_idx == 0 else "NON"
-                avg_price = float(p.get('avgPrice', 0))
+                # 2. APPEL SNIPER : On va chercher les prix JUSTE pour ces marchés
+                sniper_prices = fetch_specific_markets(my_market_ids)
                 
-                # --- LOGIQUE DE PRIX ---
-                current_price = 0
-                source = "API"
+                my_pos = []
+                total_equity = 0
                 
-                # 1. On cherche dans notre oracle (Données fraîches de l'Explorer)
-                if slug in price_oracle:
-                    try:
-                        current_price = float(price_oracle[slug][side_idx])
-                        source = "Live"
-                    except: pass
-                
-                # 2. Si pas trouvé (ex: vieux marché pas dans le top 1000), fallback API
-                if current_price == 0:
-                    current_price = float(p.get('currentPrice', 0))
-                    source = "Old"
+                for p in positions:
+                    size = float(p.get('size', 0))
+                    if size < 0.1: continue
+                    
+                    market_id = p.get('market') # L'ID précis
+                    title = p.get('title', 'Inconnu')
+                    
+                    side_idx = int(p.get('outcomeIndex', 0))
+                    side_label = "OUI" if side_idx == 0 else "NON"
+                    avg_price = float(p.get('avgPrice', 0))
+                    
+                    # --- LOGIQUE DE PRIX ---
+                    current_price = 0
+                    source = "API"
+                    
+                    # A. On cherche dans le Sniper (Priorité absolue)
+                    if market_id in sniper_prices:
+                        try:
+                            # On récupère le prix OUI ou NON selon ta position
+                            current_price = float(sniper_prices[market_id][side_idx])
+                            source = "Sniper"
+                        except: pass
+                    
+                    # B. Fallback : Si le sniper a raté (marché fermé?), on prend le vieux prix
+                    if current_price == 0:
+                        current_price = float(p.get('currentPrice', 0))
+                        source = "Old"
 
-                val = size * current_price
-                total_equity += val
-                
-                pnl = 0
-                if avg_price > 0:
-                    pnl = ((current_price - avg_price) / avg_price) * 100
+                    val = size * current_price
+                    total_equity += val
+                    
+                    pnl = 0
+                    if avg_price > 0:
+                        pnl = ((current_price - avg_price) / avg_price) * 100
 
-                my_pos.append({
-                    "Marché": title,
-                    "Côté": side_label,
-                    "Parts": size,
-                    "Achat": avg_price,
-                    "Actuel": current_price,
-                    "Valeur": val,
-                    "PnL": pnl,
-                    "Src": source # Debug pour savoir d'où vient le prix
-                })
-            
-            df_pos = pd.DataFrame(my_pos)
-            
-            if not df_pos.empty:
-                st.metric("Valeur Totale", f"${total_equity:,.2f}")
+                    my_pos.append({
+                        "Marché": title,
+                        "Côté": side_label,
+                        "Parts": size,
+                        "Achat": avg_price,
+                        "Actuel": current_price,
+                        "Valeur": val,
+                        "PnL": pnl,
+                        "Src": source
+                    })
                 
-                df_pos = df_pos.sort_values(by="Valeur", ascending=False)
+                df_pos = pd.DataFrame(my_pos)
                 
-                st.dataframe(
-                    df_pos,
-                    column_config={
-                        "Marché": st.column_config.TextColumn(width="medium"),
-                        "Parts": st.column_config.NumberColumn(format="%.1f"),
-                        "Achat": st.column_config.NumberColumn(format="%.3f"),
-                        "Actuel": st.column_config.NumberColumn(format="%.3f"),
-                        "Valeur": st.column_config.NumberColumn(format="$%.2f"),
-                        "PnL": st.column_config.NumberColumn("Profit %", format="%.1f%%"),
-                        "Src": st.column_config.TextColumn("Source", help="Live = Prix frais, Old = Prix API")
-                    },
-                    use_container_width=True,
-                    hide_index=True
-                )
-            else: st.info("Aucune position active.")
-        else: st.error("Impossible de récupérer les positions. Vérifie l'adresse.")
+                if not df_pos.empty:
+                    st.metric("Valeur Portefeuille", f"${total_equity:,.2f}")
+
+		    df_pos = df_pos.sort_values(by="Valeur", ascending=False)
+                    
+                    st.dataframe(
+                        df_pos,
+                        column_config={
+                            "Marché": st.column_config.TextColumn(width="medium"),
+                            "Parts": st.column_config.NumberColumn(format="%.1f"),
+                            "Achat": st.column_config.NumberColumn(format="%.3f"),
+                            "Actuel": st.column_config.NumberColumn(format="%.3f"),
+                            "Valeur": st.column_config.NumberColumn(format="$%.2f"),
+                            "PnL": st.column_config.NumberColumn("Profit %", format="%.1f%%"),
+                            "Src": st.column_config.TextColumn("Src", help="Sniper = Prix frais en direct")
+                        },
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                else: st.info("Aucune position active.")
+            else: st.error("Impossible de récupérer les positions.")
