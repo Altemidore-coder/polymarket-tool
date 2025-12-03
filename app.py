@@ -192,53 +192,103 @@ with tab1:
             st.info("Aucun marché trouvé.")
 
 # ==========================================
-# ONGLET 2 : MON PORTFOLIO
+# ONGLET 2 : MON PORTFOLIO (CORRIGÉ & COMPLET)
 # ==========================================
 with tab2:
     if not user_address:
-        st.warning("⚠️ Entre ton adresse Polygon dans les réglages ci-dessus pour voir tes positions.")
+        st.warning("⚠️ Entre ton adresse Polygon dans les réglages ci-dessus (Barre grise 'Réglages') pour voir tes positions.")
     else:
-        positions_data = fetch_user_positions(user_address)
+        with st.spinner("Récupération du portfolio..."):
+            positions_data = fetch_user_positions(user_address)
         
         if positions_data:
+            # --- ÉTAPE 1 : CRÉATION D'UN DICTIONNAIRE DE PRIX ---
+            # On crée un "annuaire" rapide pour trouver le prix d'un marché grâce à son ID (slug)
+            # Structure : { "trump-win": {"Yes": 0.60, "No": 0.40}, ... }
+            price_map = {}
+            for m in raw_data:
+                slug = m.get('slug')
+                if not slug or not m.get('markets'): continue
+                
+                try:
+                    prices = json.loads(m['markets'][0].get('outcomePrices', '["0","0"]'))
+                    price_map[slug] = {
+                        "0": float(prices[0]), # Prix YES
+                        "1": float(prices[1])  # Prix NO
+                    }
+                except: pass
+
+            # --- ÉTAPE 2 : TRAITEMENT DES POSITIONS ---
             my_pos = []
+            total_value = 0
+            
             for p in positions_data:
-                # On filtre les petites poussières (positions minuscules)
+                # 1. Récupération des infos de base
                 size = float(p.get('size', 0))
-                if size < 1: continue 
+                if size < 0.1: continue # On cache les "poussières"
                 
                 title = p.get('title', 'Marché Inconnu')
-                outcome = p.get('outcomeIndex') # 0 = YES, 1 = NO généralement
-                outcome_label = "OUI" if outcome == 0 else "NON"
+                slug = p.get('marketSlug')
+                outcome_idx = str(p.get('outcomeIndex', '0')) # '0' pour YES, '1' pour NO
+                outcome_label = "OUI" if outcome_idx == '0' else "NON"
                 
-                cur_price = float(p.get('currentPrice', 0))
                 avg_price = float(p.get('avgPrice', 0))
                 
-                # Calcul profit théorique
-                pnl_pct = ((cur_price - avg_price) / avg_price) * 100 if avg_price > 0 else 0
+                # 2. Récupération du PRIX ACTUEL via notre "Annuaire" (Cross-reference)
+                current_price = 0
+                if slug in price_map:
+                    # On va chercher le prix exact (Yes ou No) dans notre map
+                    current_price = price_map[slug].get(outcome_idx, 0)
+                else:
+                    # Si le marché n'est pas dans les 1000 chargés, on essaie de prendre celui de la position (souvent vieux)
+                    current_price = float(p.get('currentPrice', 0))
+
+                # 3. Calculs financiers
+                position_value = size * current_price
+                total_value += position_value
                 
+                # Calcul du Profit/Perte (PnL)
+                pnl_pct = 0
+                if avg_price > 0:
+                    pnl_pct = ((current_price - avg_price) / avg_price) * 100
+
                 my_pos.append({
                     "Marché": title,
-                    "Choix": outcome_label,
-                    "Prix Achat": avg_price,
-                    "Prix Actuel": cur_price,
-                    "PnL": pnl_pct
+                    "Côté": outcome_label,
+                    "Parts": size,                # <-- NOUVEAU
+                    "Achat": avg_price,
+                    "Actuel": current_price,      # <-- CORRIGÉ
+                    "Valeur ($)": position_value, # <-- NOUVEAU
+                    "PnL": pnl_pct,
+                    "Sort_PnL": pnl_pct
                 })
             
             df_pos = pd.DataFrame(my_pos)
             
             if not df_pos.empty:
+                # Petit résumé en haut
+                st.metric("Valeur Totale Estimée", f"${total_value:,.2f}")
+                
+                # Tri par PnL (Les plus gros gains/pertes en haut)
+                df_pos = df_pos.sort_values(by="Sort_PnL", ascending=False)
+                
                 st.dataframe(
-                    df_pos,
+                    df_pos.drop(columns=["Sort_PnL"]),
                     column_config={
-                        "Prix Achat": st.column_config.NumberColumn(format="%.2f"),
-                        "Prix Actuel": st.column_config.NumberColumn(format="%.2f"),
-                        "PnL": st.column_config.NumberColumn("Profit %", format="%.1f%%")
+                        "Marché": st.column_config.TextColumn("Marché", width="medium"),
+                        "Parts": st.column_config.NumberColumn("Parts", format="%.1f"),
+                        "Achat": st.column_config.NumberColumn("Prix Achat", format="%.3f"), # 3 décimales pour précision
+                        "Actuel": st.column_config.NumberColumn("Prix Actuel", format="%.3f"),
+                        "Valeur ($)": st.column_config.NumberColumn(format="$%.2f"),
+                        "PnL": st.column_config.NumberColumn(
+                            "Profit %", 
+                            format="%.1f%%",
+                        )
                     },
                     use_container_width=True,
                     hide_index=True
                 )
             else:
-                st.info("Aucune position active trouvée sur ce compte.")
+                st.info("Aucune position active trouvée (ou marché hors du top 1000).")
         else:
-            st.info("Impossible de charger les positions ou portefeuille vide.")
+            st.info("Portefeuille vide ou erreur de lecture.")
