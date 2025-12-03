@@ -38,16 +38,27 @@ def fetch_markets(limit=1000):
         return r.json()
     except: return []
 
-# --- FONCTION API PORTFOLIO (NOUVEAU) ---
+# --- FONCTION API PORTFOLIO (CORRIGÉE) ---
 def fetch_user_positions(address):
     if len(address) < 40: return []
-    # Endpoint pour récupérer les positions d'un user
-    url = f"https://gamma-api.polymarket.com/positions?user={address}"
+    
+    # ⚠️ CHANGEMENT IMPORTANT : On utilise 'data-api' au lieu de 'gamma-api'
+    url = "https://data-api.polymarket.com/positions"
+    
+    params = {
+        "user": address,
+        "sizeThreshold": "0.1", # Ignore les poussières (positions < 0.1 part)
+        "limit": "50"
+    }
+    
     try:
-        r = requests.get(url)
+        r = requests.get(url, params=params)
         r.raise_for_status()
         return r.json()
-    except: return []
+    except Exception as e:
+        # On affiche l'erreur dans la console pour t'aider à débugger si besoin
+        print(f"Erreur Portfolio : {e}") 
+        return []
 
 # --- INIT DATA ---
 raw_data = fetch_markets()
